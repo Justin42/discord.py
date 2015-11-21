@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 """
 The MIT License (MIT)
 
@@ -25,7 +23,7 @@ DEALINGS IN THE SOFTWARE.
 """
 
 from .permissions import Permissions
-from .colour import Colour
+from .color import Colour
 
 class Role(object):
     """Represents a Discord role in a :class:`Server`.

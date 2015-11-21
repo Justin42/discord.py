@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 """
 Discord API Wrapper
 ~~~~~~~~~~~~~~~~~~~
@@ -27,7 +25,7 @@ from .message import Message
 from .errors import *
 from .permissions import Permissions
 from .role import Role
-from .colour import Color, Colour
+from .color import Color, Colour
 from .invite import Invite
 from .object import Object
 from . import utils

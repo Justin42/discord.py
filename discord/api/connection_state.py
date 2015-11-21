@@ -175,8 +175,12 @@ class ConnectionState(EventListener):
         if server is not None:
             user_id = event.user['id']
             member = utils.find(lambda m: m.id == user_id, server.members)
-            server.members.remove(member)
-            event.member = member
+            try:
+                server.members.remove(member)
+            except ValueError:
+                return
+            else:
+                self.dispatch('member_remove', member)
 
     def on_guild_member_update(self, event: Event):
         server = self._get_server(event.guild_id)

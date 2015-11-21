@@ -3,3 +3,5 @@
 *.log
 docs/_build
 *.buildinfo
+.idea/*
+*py.egg-info/*

@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 """
 The MIT License (MIT)
 
@@ -24,12 +22,12 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-BASE          = 'https://discordapp.com'
-API_BASE      = BASE     + '/api'
-GATEWAY       = API_BASE + '/gateway'
-USERS         = API_BASE + '/users'
-REGISTER      = API_BASE + '/auth/register'
-LOGIN         = API_BASE + '/auth/login'
-LOGOUT        = API_BASE + '/auth/logout'
-SERVERS       = API_BASE + '/guilds'
-CHANNELS      = API_BASE + '/channels'
+BASE = 'https://discordapp.com'
+API_BASE = BASE + '/api'
+GATEWAY = API_BASE + '/gateway'
+USERS = API_BASE + '/users'
+REGISTER = API_BASE + '/auth/register'
+LOGIN = API_BASE + '/auth/login'
+LOGOUT = API_BASE + '/auth/logout'
+SERVERS = API_BASE + '/guilds'
+CHANNELS = API_BASE + '/channels'
