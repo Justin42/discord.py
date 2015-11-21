@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 """
 The MIT License (MIT)
 
@@ -26,399 +24,47 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import print_function
 
-from . import endpoints
-from .errors import *
-from .user import User
-from .channel import Channel, PrivateChannel
-from .server import Server
-from .member import Member
-from .role import Role, Permissions
-from .message import Message
-from . import utils
-from .invite import Invite
-from .object import Object
-
-import traceback
-import requests
-import json, re, time, copy
-from collections import deque
-import threading
-from ws4py.client import WebSocketBaseClient
-import sys
-import logging
 import itertools
+import json
+import logging
+import re
+import sys
+import threading
+import time
+import traceback
+
+import requests
+
+from discord.event.listener import EventListener
+from .event.dispatcher import EventDispatcher
+from .api import endpoints
+from .api.connection_state import ConnectionState
+from .api.websocket import WebSocket
+from .channel import Channel, PrivateChannel
+from .invite import Invite
+from .message import Message
+from .role import Role, Permissions
+from .member import Member
+from .user import User
+from .object import Object
+from .event.events import Event
+from . import utils
+from .errors import InvalidArgument, GatewayNotFound, HTTPException
 
 
 log = logging.getLogger(__name__)
 request_logging_format = '{response.request.method} {response.url} has returned {response.status_code}'
 request_success_log = '{response.url} with {json} received {data}'
 
-def _null_event(*args, **kwargs):
-    pass
 
 def _verify_successful_response(response):
     code = response.status_code
-    success = code >= 200 and code < 300
+    success = 200 <= code < 300
     if not success:
         raise HTTPException(response)
 
-class KeepAliveHandler(threading.Thread):
-    def __init__(self, seconds, socket, **kwargs):
-        threading.Thread.__init__(self, **kwargs)
-        self.seconds = seconds
-        self.socket = socket
-        self.stop = threading.Event()
 
-    def run(self):
-        while not self.stop.wait(self.seconds):
-            payload = {
-                'op': 1,
-                'd': int(time.time())
-            }
-
-            msg = 'Keeping websocket alive with timestamp {0}'
-            log.debug(msg.format(payload['d']))
-            self.socket.send(json.dumps(payload, separators=(',', ':')))
-
-class WebSocket(WebSocketBaseClient):
-    def __init__(self, dispatch, url):
-        WebSocketBaseClient.__init__(self, url,
-                                     protocols=['http-only', 'chat'])
-        self.dispatch = dispatch
-        self.keep_alive = None
-
-    def opened(self):
-        log.info('Opened at {}'.format(int(time.time())))
-        self.dispatch('socket_opened')
-
-    def closed(self, code, reason=None):
-        if self.keep_alive is not None:
-            self.keep_alive.stop.set()
-        log.info('Closed with {} ("{}") at {}'.format(code, reason,
-                                                      int(time.time())))
-        self.dispatch('socket_closed')
-
-    def handshake_ok(self):
-        pass
-
-    def send(self, payload, binary=False):
-        self.dispatch('socket_raw_send', payload, binary)
-        WebSocketBaseClient.send(self, payload, binary)
-
-    def received_message(self, msg):
-        self.dispatch('socket_raw_receive', msg)
-        response = json.loads(str(msg))
-        log.debug('WebSocket Event: {}'.format(response))
-        self.dispatch('socket_response', response)
-
-        op = response.get('op')
-        data = response.get('d')
-
-        if op != 0:
-            log.info("Unhandled op {}".format(op))
-            return # What about op 7?
-
-        event = response.get('t')
-
-        if event == 'READY':
-            interval = data['heartbeat_interval'] / 1000.0
-            self.keep_alive = KeepAliveHandler(interval, self)
-            self.keep_alive.start()
-
-
-        if event in ('READY', 'MESSAGE_CREATE', 'MESSAGE_DELETE',
-                     'MESSAGE_UPDATE', 'PRESENCE_UPDATE', 'USER_UPDATE',
-                     'CHANNEL_DELETE', 'CHANNEL_UPDATE', 'CHANNEL_CREATE',
-                     'GUILD_MEMBER_ADD', 'GUILD_MEMBER_REMOVE',
-                     'GUILD_MEMBER_UPDATE', 'GUILD_CREATE', 'GUILD_DELETE',
-                     'GUILD_ROLE_CREATE', 'GUILD_ROLE_DELETE',
-                     'GUILD_ROLE_UPDATE', 'VOICE_STATE_UPDATE'):
-            self.dispatch('socket_update', event, data)
-
-        else:
-            log.info("Unhandled event {}".format(event))
-
-
-class ConnectionState(object):
-    def __init__(self, dispatch, **kwargs):
-        self.dispatch = dispatch
-        self.user = None
-        self.email = None
-        self.servers = []
-        self.private_channels = []
-        self.messages = deque([], maxlen=kwargs.get('max_length', 5000))
-
-    def _get_message(self, msg_id):
-        return utils.find(lambda m: m.id == msg_id, self.messages)
-
-    def _get_server(self, guild_id):
-        return utils.find(lambda g: g.id == guild_id, self.servers)
-
-    def _update_voice_state(self, server, data):
-        user_id = data.get('user_id')
-        member = utils.find(lambda m: m.id == user_id, server.members)
-        if member is not None:
-            ch_id = data.get('channel_id')
-            channel = utils.find(lambda c: c.id == ch_id, server.channels)
-            member.update_voice_state(voice_channel=channel, **data)
-        return member
-
-    def _add_server(self, guild):
-        guild['roles'] = [Role(everyone=(guild['id'] == role['id']), **role) for role in guild['roles']]
-        members = guild['members']
-        owner = guild['owner_id']
-        for i, member in enumerate(members):
-            roles = member['roles']
-            for j, roleid in enumerate(roles):
-                role = utils.find(lambda r: r.id == roleid, guild['roles'])
-                if role is not None:
-                    roles[j] = role
-            members[i] = Member(**member)
-
-            # found the member that owns the server
-            if members[i].id == owner:
-                owner = members[i]
-
-        for presence in guild['presences']:
-            user_id = presence['user']['id']
-            member = utils.find(lambda m: m.id == user_id, members)
-            if member is not None:
-                member.status = presence['status']
-                member.game_id = presence['game_id']
-
-
-        server = Server(owner=owner, **guild)
-
-        # give all the members their proper server
-        for member in server.members:
-            member.server = server
-
-        channels = [Channel(server=server, **channel)
-                    for channel in guild['channels']]
-        server.channels = channels
-        for obj in guild.get('voice_states', []):
-            self._update_voice_state(server, obj)
-        self.servers.append(server)
-
-    def handle_ready(self, data):
-        self.user = User(**data['user'])
-        guilds = data.get('guilds')
-
-        for guild in guilds:
-            if guild.get('unavailable', False):
-                continue
-            self._add_server(guild)
-
-        for pm in data.get('private_channels'):
-            self.private_channels.append(PrivateChannel(id=pm['id'],
-                                         user=User(**pm['recipient'])))
-
-        # we're all ready
-        self.dispatch('ready')
-
-    def handle_message_create(self, data):
-        channel = self.get_channel(data.get('channel_id'))
-        message = Message(channel=channel, **data)
-        self.dispatch('message', message)
-        self.messages.append(message)
-
-    def handle_message_delete(self, data):
-        channel = self.get_channel(data.get('channel_id'))
-        message_id = data.get('id')
-        found = self._get_message(message_id)
-        if found is not None:
-            self.dispatch('message_delete', found)
-            self.messages.remove(found)
-
-    def handle_message_update(self, data):
-        older_message = self._get_message(data.get('id'))
-        if older_message is not None:
-            # create a copy of the new message
-            message = copy.deepcopy(older_message)
-            # update the new update
-            for attr in data:
-                if attr == 'channel_id' or attr == 'author':
-                    continue
-                value = data[attr]
-                if 'time' in attr:
-                    setattr(message, attr, utils.parse_time(value))
-                else:
-                    setattr(message, attr, value)
-            self.dispatch('message_edit', older_message, message)
-            # update the older message
-            older_message = message
-
-    def handle_presence_update(self, data):
-        server = self._get_server(data.get('guild_id'))
-        if server is not None:
-            status = data.get('status')
-            user = data['user']
-            member_id = user['id']
-            member = utils.find(lambda m: m.id == member_id, server.members)
-            if member is not None:
-                member.status = data.get('status')
-                member.game_id = data.get('game_id')
-                member.name = user.get('username', member.name)
-                member.avatar = user.get('avatar', member.avatar)
-
-                # call the event now
-                self.dispatch('status', member)
-                self.dispatch('member_update', member)
-
-    def handle_user_update(self, data):
-        self.user = User(**data)
-
-    def handle_channel_delete(self, data):
-        server =  self._get_server(data.get('guild_id'))
-        if server is not None:
-            channel_id = data.get('id')
-            channel = utils.find(lambda c: c.id == channel_id, server.channels)
-            server.channels.remove(channel)
-            self.dispatch('channel_delete', channel)
-
-    def handle_channel_update(self, data):
-        server = self._get_server(data.get('guild_id'))
-        if server is not None:
-            channel_id = data.get('id')
-            channel = utils.find(lambda c: c.id == channel_id, server.channels)
-            channel.update(server=server, **data)
-            self.dispatch('channel_update', channel)
-
-    def handle_channel_create(self, data):
-        is_private = data.get('is_private', False)
-        channel = None
-        if is_private:
-            recipient = User(**data.get('recipient'))
-            pm_id = data.get('id')
-            channel = PrivateChannel(id=pm_id, user=recipient)
-            self.private_channels.append(channel)
-        else:
-            server = self._get_server(data.get('guild_id'))
-            if server is not None:
-                channel = Channel(server=server, **data)
-                server.channels.append(channel)
-
-        self.dispatch('channel_create', channel)
-
-    def handle_guild_member_add(self, data):
-        server = self._get_server(data.get('guild_id'))
-        member = Member(server=server, deaf=False, mute=False, **data)
-        server.members.append(member)
-        self.dispatch('member_join', member)
-
-    def handle_guild_member_remove(self, data):
-        server = self._get_server(data.get('guild_id'))
-        if server is not None:
-            user_id = data['user']['id']
-            member = utils.find(lambda m: m.id == user_id, server.members)
-            try:
-                server.members.remove(member)
-            except ValueError:
-                return
-            else:
-                self.dispatch('member_remove', member)
-
-    def handle_guild_member_update(self, data):
-        server = self._get_server(data.get('guild_id'))
-        user_id = data['user']['id']
-        member = utils.find(lambda m: m.id == user_id, server.members)
-        if member is not None:
-            user = data['user']
-            member.name = user['username']
-            member.discriminator = user['discriminator']
-            member.avatar = user['avatar']
-            member.roles = []
-            # update the roles
-            for role in server.roles:
-                if role.id in data['roles']:
-                    member.roles.append(role)
-
-            self.dispatch('member_update', member)
-
-    def handle_guild_create(self, data):
-        unavailable = data.get('unavailable')
-        if unavailable == False:
-            # GUILD_CREATE with unavailable in the response
-            # usually means that the server has become available
-            # and is therefore in the cache
-            server = self._get_server(data.get('id'))
-            if server is not None:
-                server.unavailable = False
-                self.dispatch('server_available', server)
-                return
-
-        if unavailable == True:
-            # joined a server with unavailable == True so..
-            return
-
-            # if we're at this point then it was probably
-            # unavailable during the READY event and is now
-            # available, so it isn't in the cache...
-
-        self._add_server(data)
-        self.dispatch('server_join', self.servers[-1])
-
-    def handle_guild_delete(self, data):
-        server = self._get_server(data.get('id'))
-        if data.get('unavailable', False) and server is not None:
-            # GUILD_DELETE with unavailable being True means that the
-            # server that was available is now currently unavailable
-            server.unavailable = True
-            self.dispatch('server_unavailable', server)
-            return
-
-        try:
-            self.servers.remove(server)
-        except ValueError:
-            return
-        else:
-            self.dispatch('server_remove', server)
-
-    def handle_guild_role_create(self, data):
-        server = self._get_server(data.get('guild_id'))
-        role_data = data.get('role', {})
-        everyone = server.id == role_data.get('id')
-        role = Role(everyone=everyone, **role_data)
-        server.roles.append(role)
-        self.dispatch('server_role_create', server, role)
-
-    def handle_guild_role_delete(self, data):
-        server = self._get_server(data.get('guild_id'))
-        if server is not None:
-            role_id = data.get('role_id')
-            role = utils.find(lambda r: r.id == role_id, server.roles)
-            server.roles.remove(role)
-            self.dispatch('server_role_delete', server, role)
-
-    def handle_guild_role_update(self, data):
-        server = self._get_server(data.get('guild_id'))
-        if server is not None:
-            role_id = data['role']['id']
-            role = utils.find(lambda r: r.id == role_id, server.roles)
-            role.update(**data['role'])
-            self.dispatch('server_role_update', role)
-
-    def handle_voice_state_update(self, data):
-        server = self._get_server(data.get('guild_id'))
-        if server is not None:
-            updated_member = self._update_voice_state(server, data)
-            self.dispatch('voice_state_update', updated_member)
-
-    def get_channel(self, id):
-        if id is None:
-            return None
-
-        for server in self.servers:
-            for channel in server.channels:
-                if channel.id == id:
-                    return channel
-
-        for pm in self.private_channels:
-            if pm.id == id:
-                return pm
-
-
-class Client(object):
+class Client(EventDispatcher, EventListener):
     """Represents a client connection that connects to Discord.
     This class is used to interact with the Discord WebSocket and API.
 
@@ -451,7 +97,7 @@ class Client(object):
         self._is_logged_in = False
         self._close = False
         self.options = kwargs
-        self.connection = ConnectionState(self.dispatch, **kwargs)
+        self.connection = ConnectionState(self, **kwargs)
         self.dispatch_lock = threading.RLock()
         self.token = ''
 
@@ -461,15 +107,18 @@ class Client(object):
             'authorization': self.token,
         }
 
+    def _null_event(*args, **kwargs):
+        pass
+
     def _create_websocket(self, url, reconnect=False):
         if url is None:
             raise GatewayNotFound()
         log.info('websocket gateway found')
-        self.ws = WebSocket(self.dispatch, url)
+        self.ws = WebSocket(self, url)
         self.ws.connect()
         log.info('websocket has connected')
 
-        if reconnect == False:
+        if not reconnect:
             second_payload = {
                 'op': 2,
                 'd': {
@@ -542,19 +191,19 @@ class Client(object):
         else:
             object.__setattr__(self, name, value)
 
-    def dispatch(self, event, *args, **kwargs):
+    def dispatch(self, event: Event):
         with self.dispatch_lock:
             log.debug("Dispatching event {}".format(event))
-            handle_method = '_'.join(('handle', event))
-            event_method = '_'.join(('on', event))
-            getattr(self, handle_method, _null_event)(*args, **kwargs)
+            handle_method = '_'.join(('handle', event.type.name.lower()))
+            event_method = '_'.join(('on', event.type.name.lower()))
+            getattr(self, handle_method, self._null_event)(event.data)
             try:
-                getattr(self, event_method, _null_event)(*args, **kwargs)
+                getattr(self, event_method, self._null_event)(event)
             except Exception as e:
-                getattr(self, 'on_error')(event_method, *args, **kwargs)
+                getattr(self, 'on_error')(event)
 
     def handle_socket_update(self, event, data):
-        method = '_'.join(('handle', event.lower()))
+        method = '_'.join(('handle', event.name.lower()))
         getattr(self.connection, method)(data)
 
     def run(self):
@@ -571,7 +220,7 @@ class Client(object):
             gateway = requests.get(endpoints.GATEWAY, headers=self.headers)
             if gateway.status_code != 200:
                 raise GatewayNotFound()
-            self.connection = ConnectionState(self.dispatch, **self.options)
+            self.connection = ConnectionState(self, **self.options)
             self._create_websocket(gateway.json().get('url'), reconnect=False)
             self.ws.run()
 
@@ -679,33 +328,16 @@ class Client(object):
         log.debug(request_logging_format.format(response=response))
         _verify_successful_response(response)
 
-    def send_file(self, destination, fp, filename=None):
+    def send_file(self, destination, filename):
         """Sends a message to the destination given with the file given.
 
         The destination parameter follows the same rules as :meth:`send_message`.
 
-        The ``fp`` parameter should be either a string denoting the location for a
-        file or a *file-like object*. The *file-like object* passed is **not closed**
-        at the end of execution. You are responsible for closing it yourself.
-
-        .. note::
-
-            If the file-like object passed is opened via ``open`` then the modes
-            'rb' should be used.
-
-        The ``filename`` parameter is the filename of the file.
-        If this is not given then it defaults to ``fp.name`` or if ``fp`` is a string
-        then the ``filename`` will default to the string given. You can overwrite
-        this value by passing this in.
-
         Note that this requires proper permissions in order to work.
         This function raises :exc:`HTTPException` if the request failed.
-        It also raises :exc:`InvalidArgument` if ``fp.name`` is an invalid
-        default for ``filename``.
 
         :param destination: The location to send the message.
-        :param fp: The *file-like object* or file path to send.
-        :param filename: The filename of the file. Defaults to ``fp.name`` if it's available.
+        :param filename: The file to send.
         :return: The :class:`Message` sent.
         """
 
@@ -714,21 +346,9 @@ class Client(object):
         url = '{base}/{id}/messages'.format(base=endpoints.CHANNELS, id=channel_id)
         response = None
 
-        try:
-            # attempt to open the file and send the request
-            with open(fp, 'rb') as f:
-                files = {
-                    'file': (fp if filename is None else filename, f)
-                }
-                response = requests.post(url, files=files, headers=self.headers)
-        except TypeError:
-            # if we got a TypeError then this is probably a file-like object
-            fname = getattr(fp, 'name', None) if filename is None else filename
-            if fname is None:
-                raise InvalidArgument('file-like object has no name attribute and no filename was specified')
-
+        with open(filename, 'rb') as f:
             files = {
-                'file': (fname, fp)
+                'file': (filename, f)
             }
             response = requests.post(url, files=files, headers=self.headers)
 
