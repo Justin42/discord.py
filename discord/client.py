@@ -94,11 +94,13 @@ class Client(EventDispatcher, EventListener):
     """
 
     def __init__(self, **kwargs):
+        super().__init__()
         self._is_logged_in = False
         self._close = False
         self.options = kwargs
-        self.connection = ConnectionState(self, **kwargs)
-        self.dispatch_lock = threading.RLock()
+        self.connection = ConnectionState(self, self, **kwargs)
+        self.add_listener(self.connection)
+        self.add_listener(self)
         self.token = ''
 
         # the actual headers for the request...
@@ -190,21 +192,6 @@ class Client(EventDispatcher, EventListener):
             return setattr(self.connection, name, value)
         else:
             object.__setattr__(self, name, value)
-
-    def dispatch(self, event: Event):
-        with self.dispatch_lock:
-            log.debug("Dispatching event {}".format(event))
-            handle_method = '_'.join(('handle', event.type.name.lower()))
-            event_method = '_'.join(('on', event.type.name.lower()))
-            getattr(self, handle_method, self._null_event)(event.data)
-            try:
-                getattr(self, event_method, self._null_event)(event)
-            except Exception as e:
-                getattr(self, 'on_error')(event)
-
-    def handle_socket_update(self, event, data):
-        method = '_'.join(('handle', event.name.lower()))
-        getattr(self.connection, method)(data)
 
     def run(self):
         """Runs the client and allows it to receive messages and events.

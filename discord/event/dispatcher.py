@@ -1,82 +1,30 @@
-from ..event.event_type import EventType
+import logging
+import threading
+
+from ..event.listener import EventListener
 from .events import Event
+
+log = logging.getLogger(__name__)
 
 
 class EventDispatcher:
-    listeners = []
+    def __init__(self):
+        self.dispatch_lock = threading.RLock()
+        self.listeners = []
 
-    def dispatch(self, event: Event):
-
+    def dispatch(self, event: Event): # TODO Call on_event to add client attribute
+        with self.dispatch_lock:
+            log.debug("Dispatching event {}".format(event.data))
+            event_method = '_'.join(('on', event.type.name.lower()))
+            # noinspection PyBroadException
+            try:
+                getattr(self, event_method, self.unhandled_event)(event)
+            except Exception as e:
+                getattr(self, 'on_error')(event)
         pass
 
-    def handle_socket_opened(self):
-        pass
+    def add_listener(self, listener: EventListener):
+        self.listeners.append(listener)
 
-    def handle_socket_closed(self):
-        pass
-
-    def handle_socket_raw_receive(self, raw):
-        pass
-
-    def handle_socket_response(self, response):
-        pass
-
-    def handle_socket_raw_send(self, payload, binary):
-        pass
-
-    def handle_socket_update(self, event_type: EventType, data: map):
-        pass
-
-    def handle_ready(self, data: map):
-        pass
-
-    def handle_message_create(self, data: map):
-        pass
-
-    def handle_message_delete(self, data: map):
-        pass
-
-    def handle_message_update(self, data: map):
-        pass
-
-    def handle_presence_update(self, data: map):
-        pass
-
-    def handle_user_update(self, data: map):
-        pass
-
-    def handle_channel_delete(self, data: map):
-        pass
-
-    def handle_channel_update(self, data: map):
-        pass
-
-    def handle_channel_create(self, data: map):
-        pass
-
-    def handle_guild_member_add(self, data: map):
-        pass
-
-    def handle_guild_member_remove(self, data: map):
-        pass
-
-    def handle_guild_member_update(self, data: map):
-        pass
-
-    def handle_guild_create(self, data: map):
-        pass
-
-    def handle_guild_delete(self, data: map):
-        pass
-
-    def handle_guild_role_create(self, data: map):
-        pass
-
-    def handle_guild_role_delete(self, data: map):
-        pass
-
-    def handle_guild_role_update(self, data: map):
-        pass
-
-    def handle_voice_state_update(self, data: map):
+    def unhandled_event(self, event):
         pass

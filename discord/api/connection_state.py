@@ -1,9 +1,9 @@
 import copy
 from collections import deque
 
+from ..event.listener import EventListener
 from ..event.event_type import EventType
 from ..event.events import Event
-from ..event.dispatcher import EventDispatcher
 from .. import utils
 from ..message import Message
 from ..channel import Channel, PrivateChannel
@@ -13,10 +13,10 @@ from ..member import Member
 from ..user import User
 
 
-class ConnectionState(EventDispatcher):
-    def __init__(self, client, **kwargs):
+class ConnectionState(EventListener):
+    def __init__(self, client, dispatcher, **kwargs):
         self.client = client
-        self.dispatch = client.dispatch
+        self.dispatch = dispatcher
         self.user = None
         self.email = None
         self.servers = []
@@ -74,198 +74,166 @@ class ConnectionState(EventDispatcher):
             self._update_voice_state(server, obj)
         self.servers.append(server)
 
-    def handle_ready(self, data):
-        self.user = User(**data['user'])
-        guilds = data.get('guilds')
+    def on_ready(self, event: Event):
+        self.user = User(**event.user)
+        guilds = event.guilds
 
         for guild in guilds:
             self._add_server(guild)
 
-        for pm in data.get('private_channels'):
+        for pm in event.private_channels:
             self.private_channels.append(PrivateChannel(id=pm['id'],
                                          user=User(**pm['recipient'])))
 
-        # we're all ready
-        self.dispatch(Event(EventType.READY, data, self.client))
-
-    def handle_message_create(self, data):
-        channel = self.get_channel(data.get('channel_id'))
-        message = Message(channel=channel, **data)
-        self.dispatch(Event(EventType.MESSAGE_CREATE, data, self.client))
+    def on_message_create(self, event: Event):
+        channel = self.get_channel(event.channel_id)
+        message = Message(channel=channel, **event.data)
         self.messages.append(message)
 
-    def handle_message_delete(self, data):
-        message_id = data.get('id')
+    def on_message_delete(self, event: Event):
+        message_id = event.id
         found = self._get_message(message_id)
         if found is not None:
-            event = Event(EventType.MESSAGE_DELETE, data, self.client)
-            event.channel = self.get_channel(data.get('channel_id'))
-            self.dispatch(event)
+            event.channel = self.get_channel(event.channel_id)
             self.messages.remove(found)
 
-    def handle_message_update(self, data):
-        older_message = self._get_message(data.get('id'))
+    def on_message_update(self, event: Event):
+        older_message = self._get_message(event.id)
         if older_message is not None:
             # create a copy of the new message
             message = copy.deepcopy(older_message)
             # update the new update
-            for attr in data:
+            for attr in event.data:
                 if attr == 'channel_id' or attr == 'author':
                     continue
-                value = data[attr]
+                value = event.data[attr]
                 if 'time' in attr:
                     setattr(message, attr, utils.parse_time(value))
                 else:
                     setattr(message, attr, value)
-            event = Event(EventType.MESSAGE_UPDATE, data, self.client)
             event.old_message = older_message
             event.new_message = message
             self.dispatch(event)
 
-    def handle_presence_update(self, data):
-        server = self._get_server(data.get('guild_id'))
+    def on_presence_update(self, event: Event):
+        server = self._get_server(event.guild_id)
         if server is not None:
-            status = data.get('status')
-            user = data['user']
+            status = event.status
+            user = event.user
             member_id = user['id']
             member = utils.find(lambda m: m.id == member_id, server.members)
             if member is not None:
-                member.status = data.get('status')
-                member.game_id = data.get('game_id')
+                member.status = event.status
+                member.game_id = event.game_id
                 member.name = user.get('username', member.name)
                 member.avatar = user.get('avatar', member.avatar)
 
                 # call the event now
-                event = Event(EventType.PRESENCE_UPDATE, data, self.client)
                 event.member = member
-                self.dispatch(event)
 
-    def handle_user_update(self, data):
-        self.user = User(**data)
+    def on_user_update(self, event: Event):
+        self.user = User(**event.data)
 
-    def handle_channel_delete(self, data):
-        server =  self._get_server(data.get('guild_id'))
+    def on_channel_delete(self, event: Event):
+        server =  self._get_server(event.guild_id)
         if server is not None:
-            channel_id = data.get('id')
+            channel_id = event.id
             channel = utils.find(lambda c: c.id == channel_id, server.channels)
             server.channels.remove(channel)
-            event = Event(EventType.CHANNEL_DELETE, data, self.client)
             event.channel = channel
 
-    def handle_channel_update(self, data):
-        server = self._get_server(data.get('guild_id'))
+    def on_channel_update(self, event: Event):
+        server = self._get_server(event.guild_id)
         if server is not None:
-            channel_id = data.get('id')
+            channel_id = event.id
             channel = utils.find(lambda c: c.id == channel_id, server.channels)
-            channel.update(server=server, **data)
-            event = Event(EventType.CHANNEL_UPDATE, data, self.client)
+            channel.update(server=server, **event.data)
             event.channel = channel
-            self.dispatch(event)
 
-    def handle_channel_create(self, data):
-        is_private = data.get('is_private', False)
+    def on_channel_create(self, event: Event):
+        is_private = getattr(event, 'is_private', False)
         channel = None
         if is_private:
-            recipient = User(**data.get('recipient'))
-            pm_id = data.get('id')
+            recipient = User(**event.recipient)
+            pm_id = event.id
             channel = PrivateChannel(id=pm_id, user=recipient)
             self.private_channels.append(channel)
         else:
-            server = self._get_server(data.get('guild_id'))
+            server = self._get_server(event.guild_id)
             if server is not None:
-                channel = Channel(server=server, **data)
+                channel = Channel(server=server, **event.data)
                 server.channels.append(channel)
 
-        self.dispatch(Event(EventType.CHANNEL_CREATE, data, self.client))
-
-    def handle_guild_member_add(self, data):
-        server = self._get_server(data.get('guild_id'))
-        member = Member(server=server, deaf=False, mute=False, **data)
+    def on_guild_member_add(self, event: Event):
+        server = self._get_server(event.guild_id)
+        member = Member(server=server, deaf=False, mute=False, **event.data)
         server.members.append(member)
-        event = Event(EventType.GUILD_MEMBER_ADD, data, self.client)
         event.member = member
-        self.dispatch(event)
 
-    def handle_guild_member_remove(self, data):
-        server = self._get_server(data.get('guild_id'))
+    def on_guild_member_remove(self, event: Event):
+        server = self._get_server(event.guild_id)
         if server is not None:
-            user_id = data['user']['id']
+            user_id = event.user['id']
             member = utils.find(lambda m: m.id == user_id, server.members)
             server.members.remove(member)
-            event = Event(EventType.GUILD_MEMBER_REMOVE, data, self.client)
             event.member = member
-            self.dispatch(event)
 
-    def handle_guild_member_update(self, data):
-        server = self._get_server(data.get('guild_id'))
-        user_id = data['user']['id']
+    def on_guild_member_update(self, event: Event):
+        server = self._get_server(event.guild_id)
+        user_id = event.user['id']
         member = utils.find(lambda m: m.id == user_id, server.members)
         if member is not None:
-            user = data['user']
+            user = event.user
             member.name = user['username']
             member.discriminator = user['discriminator']
             member.avatar = user['avatar']
             member.roles = []
             # update the roles
             for role in server.roles:
-                if role.id in data['roles']:
+                if role.id in event.roles:
                     member.roles.append(role)
-            event = Event(EventType.GUILD_MEMBER_UPDATE, data, self.client)
             event.member = member
-            self.dispatch(event)
 
-    def handle_guild_create(self, data):
-        self._add_server(data)
-        event = Event(EventType.GUILD_CREATE, data, self.client)
+    def on_guild_create(self, event: Event):
+        self._add_server(event.data)
         event.server = self.servers[-1]
-        self.dispatch(event)
 
-    def handle_guild_delete(self, data):
-        server = self._get_server(data.get('id'))
+    def on_guild_delete(self, event: Event):
+        server = self._get_server(event.id)
         self.servers.remove(server)
-        event = Event(EventType.GUILD_DELETE, data, self.client)
         event.server = server
-        self.dispatch(event)
 
-    def handle_guild_role_create(self, data):
-        server = self._get_server(data.get('guild_id'))
-        role_data = data.get('role', {})
+    def on_guild_role_create(self, event: Event):
+        server = self._get_server(event.guild_id)
+        role_data = event.data.get('role', {})
         everyone = server.id == role_data.get('id')
         role = Role(everyone=everyone, **role_data)
         server.roles.append(role)
-        event = Event(EventType.GUILD_ROLE_CREATE, data, self.client)
         event.server = server
         event.role = role
-        self.dispatch(event)
 
-    def handle_guild_role_delete(self, data):
-        server = self._get_server(data.get('guild_id'))
+    def on_guild_role_delete(self, event: Event):
+        server = self._get_server(event.guild_id)
         if server is not None:
-            role_id = data.get('role_id')
+            role_id = event.data.get('role_id')
             role = utils.find(lambda r: r.id == role_id, server.roles)
             server.roles.remove(role)
-            event = Event(EventType.GUILD_ROLE_DELETE, data, self.client)
             event.server = server
             event.role = role
-            self.dispatch(event)
 
-    def handle_guild_role_update(self, data):
-        server = self._get_server(data.get('guild_id'))
+    def on_guild_role_update(self, event: Event):
+        server = self._get_server(event.guild_id)
         if server is not None:
-            role_id = data['role']['id']
+            role_id = event.role['id']
             role = utils.find(lambda r: r.id == role_id, server.roles)
-            role.update(**data['role'])
-            event = Event(EventType.GUILD_ROLE_UPDATE, data, self.client)
+            role.update(**event.role)
             event.role = role
-            self.dispatch(event)
 
-    def handle_voice_state_update(self, data):
-        server = self._get_server(data.get('guild_id'))
+    def on_voice_state_update(self, event: Event):
+        server = self._get_server(event.guild_id)
         if server is not None:
-            updated_member = self._update_voice_state(server, data)
-            event = Event(EventType.VOICE_STATE_UPDATE, data, self.client)
+            updated_member = self._update_voice_state(server, event.data)
             event.member = updated_member
-            self.dispatch(event)
 
     def get_channel(self, id):
         if id is None:

@@ -5,42 +5,43 @@ import threading
 import time
 from ws4py.client import WebSocketBaseClient
 
-from discord.event.dispatcher import EventDispatcher
-from discord.event.event_type import EventType
+from ..event.event_type import EventType
+from ..event.events import Event
 
 log = logging.getLogger(__name__)
 
 
 class WebSocket(WebSocketBaseClient):
-    def __init__(self, dispatch: EventDispatcher, url):
+    def __init__(self, client, url):
         WebSocketBaseClient.__init__(self, url,
                                      protocols=['http-only', 'chat'])
-        self.dispatch = dispatch
+        self.dispatch = client.dispatch
+        self.client = client
         self.keep_alive = None
 
     def opened(self):
         log.info('Opened at {}'.format(int(time.time())))
-        self.dispatch.handle_socket_opened()
+        self.dispatch(Event(EventType.SOCKET_OPENED, {}, self.client))
 
     def closed(self, code, reason=None):
         if self.keep_alive is not None:
             self.keep_alive.stop.set()
         log.info('Closed with {} ("{}") at {}'.format(code, reason,
                                                       int(time.time())))
-        self.dispatch.handle_socket_closed()
+        self.dispatch(Event(EventType.SOCKET_CLOSED, {}, self.client))
 
     def handshake_ok(self):
         pass
 
     def send(self, payload, binary=False):
-        self.dispatch.handle_socket_raw_send(payload, binary)
+        self.dispatch(Event(EventType.SOCKET_RAW_SEND, {'payload': payload, 'binary': binary}, self.client))
         WebSocketBaseClient.send(self, payload, binary)
 
     def received_message(self, msg):
-        self.dispatch.handle_socket_raw_receive(msg)
+        self.dispatch(Event(EventType.SOCKET_RAW_RECEIVE, {'msg': msg}, self.client))
         response = json.loads(str(msg))
         log.debug('WebSocket Event: {}'.format(response))
-        self.dispatch.handle_socket_response(response)
+        self.dispatch(Event(EventType.SOCKET_RESPONSE, {'response': response}, self.client))
 
         op = response.get('op')
         data = response.get('d')
@@ -63,8 +64,9 @@ class WebSocket(WebSocketBaseClient):
                      'GUILD_MEMBER_UPDATE', 'GUILD_CREATE', 'GUILD_DELETE',
                      'GUILD_ROLE_CREATE', 'GUILD_ROLE_DELETE',
                      'GUILD_ROLE_UPDATE', 'VOICE_STATE_UPDATE'):
-            self.dispatch.handle_socket_update(getattr(EventType, event, EventType.UNKNOWN), data)
-            print(event, data)
+            event_type = getattr(EventType, event, EventType.UNKNOWN)
+            self.dispatch(Event(event_type, data, self.client))
+            print(event_type, data)
 
         else:
             log.info("Unhandled event {}".format(event))

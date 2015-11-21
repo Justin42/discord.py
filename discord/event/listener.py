@@ -6,22 +6,25 @@ class EventListener:
     def on_error(self, event: Event):
         pass
 
-    def on_socket_opened(self):
+    def on_event(self, event: Event):
         pass
 
-    def on_socket_closed(self):
+    def on_socket_opened(self, event: Event):
         pass
 
-    def on_socket_raw_receive(self, raw):
+    def on_socket_closed(self, event: Event):
         pass
 
-    def on_socket_response(self, response):
+    def on_socket_raw_receive(self, event: Event):
         pass
 
-    def on_socket_raw_send(self, payload, binary):
+    def on_socket_response(self, event: Event):
         pass
 
-    def on_socket_update(self, event_type: EventType, data: map):
+    def on_socket_raw_send(self, event: Event):
+        pass
+
+    def on_socket_update(self, event: Event):
         pass
 
     def on_ready(self, event: Event):
